@@ -153,7 +153,7 @@ class Controller(object, metaclass=abc.ABCMeta):
             self.J_full = np.array(np.vstack([self.J_pos, self.J_ori]))
 
             mass_matrix = np.ndarray(shape=(self.sim.model.nv, self.sim.model.nv), dtype=np.float64, order="C")
-            mujoco.mj_fullM(self.sim.model._model, mass_matrix, self.sim.data.qM)
+            mujoco.mj_fullM(self.sim.model._model, self.sim.data._data, mass_matrix)
             mass_matrix = np.reshape(mass_matrix, (len(self.sim.data.qvel), len(self.sim.data.qvel)))
             self.mass_matrix = mass_matrix[self.qvel_index, :][:, self.qvel_index]
 
