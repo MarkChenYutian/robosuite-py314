@@ -33,36 +33,67 @@ from mujoco.egl import egl_ext as EGL
 from OpenGL import error
 
 
+# From the EGL_EXT_device_query and EGL_NV_device_cuda extensions.
+EGL_CUDA_DEVICE_NV = 0x323A
+try:
+    _eglQueryDeviceAttribEXT = ctypes.CFUNCTYPE(
+        EGL.EGLBoolean, EGL.EGLDeviceEXT, ctypes.c_int, ctypes.POINTER(ctypes.c_ssize_t)
+    )(EGL.eglGetProcAddress("eglQueryDeviceAttribEXT"))
+except TypeError:
+    _eglQueryDeviceAttribEXT = None
+
+
+def _cuda_ordinal(device):
+    """CUDA ordinal of an EGL device, relative to CUDA_VISIBLE_DEVICES like torch's, or None if it has none."""
+    if _eglQueryDeviceAttribEXT is None:
+        return None
+    value = ctypes.c_ssize_t(-1)
+    if _eglQueryDeviceAttribEXT(device, EGL_CUDA_DEVICE_NV, ctypes.byref(value)) != EGL.EGL_TRUE:
+        EGL.eglGetError()  # clear the error of a device without CUDA
+        return None
+    return value.value
+
+
+def _requested_cuda_ordinal(device_id):
+    """CUDA ordinal of device_id: a GPU id listed in CUDA_VISIBLE_DEVICES (any id if unset), -1 for the first visible."""
+    if device_id == -1:
+        return 0
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if not visible:
+        return device_id
+    visible_ids = [x.strip() for x in visible.split(",")]
+    if str(device_id) not in visible_ids:
+        raise RuntimeError(f"Render device {device_id} is not in CUDA_VISIBLE_DEVICES={visible!r}.")
+    return visible_ids.index(str(device_id))
+
+
 def create_initialized_egl_device_display(device_id=0):
-    """Creates an initialized EGL display directly on a device."""
-    all_devices = EGL.eglQueryDevicesEXT()
-    selected_device = (
-        os.environ.get("CUDA_VISIBLE_DEVICES", None)
-        if os.environ.get("MUJOCO_EGL_DEVICE_ID", None) is None
-        else os.environ.get("MUJOCO_EGL_DEVICE_ID", None)
-    )
-    if selected_device is None:
-        candidates = all_devices
-        if device_id == -1:
-            device_idx = 0
-        else:
-            device_idx = device_id
-    else:
-        if not selected_device.isdigit():
-            device_inds = [int(x) for x in selected_device.split(",")]
-            if device_id == -1:
-                device_idx = device_inds[0]
-            else:
-                assert device_id in device_inds, "specified device id is not made visible in environment variables."
-                device_idx = device_id
-        else:
-            device_idx = int(selected_device)
-        if not 0 <= device_idx < len(all_devices):
+    """Creates an initialized EGL display directly on a device.
+
+    The EGL device order generally differs from the CUDA order, so the device is the EGL device whose CUDA ordinal
+    (EGL_NV_device_cuda) is that of device_id, see _requested_cuda_ordinal. MUJOCO_EGL_DEVICE_ID, if set, overrides
+    it with a raw index into eglQueryDevicesEXT (as in mujoco.egl). Without CUDA devices, device_id (0 if -1) is
+    used as a raw index.
+    """
+    all_devices = EGL.eglQueryDevicesEXT(max_devices=64)
+    egl_device_id = os.environ.get("MUJOCO_EGL_DEVICE_ID", None)
+    if egl_device_id is not None:
+        if not (egl_device_id.isdigit() and int(egl_device_id) < len(all_devices)):
             raise RuntimeError(
                 f"The MUJOCO_EGL_DEVICE_ID environment variable must be an integer "
-                f"between 0 and {len(all_devices)-1} (inclusive), got {device_idx}."
+                f"between 0 and {len(all_devices)-1} (inclusive), got {egl_device_id}."
             )
-    candidates = all_devices[device_idx : device_idx + 1]
+        candidates = all_devices[int(egl_device_id) : int(egl_device_id) + 1]
+    else:
+        ordinals = [_cuda_ordinal(device) for device in all_devices]
+        if any(ordinal is not None for ordinal in ordinals):
+            requested = _requested_cuda_ordinal(device_id)
+            candidates = [device for device, ordinal in zip(all_devices, ordinals) if ordinal == requested]
+            if not candidates:
+                raise RuntimeError(f"No EGL device for CUDA device {requested}, the EGL devices have CUDA {ordinals}.")
+        else:
+            device_idx = max(device_id, 0)
+            candidates = all_devices[device_idx : device_idx + 1]
     for device in candidates:
         display = EGL.eglGetPlatformDisplayEXT(EGL.EGL_PLATFORM_DEVICE_EXT, device, None)
         if display != EGL.EGL_NO_DISPLAY and EGL.eglGetError() == EGL.EGL_SUCCESS:
